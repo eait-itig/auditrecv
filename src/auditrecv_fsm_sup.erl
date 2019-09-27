@@ -48,9 +48,10 @@ init([]) ->
     EsConfig = application:get_env(auditrecv, elasticsearch, []),
     EsHost = proplists:get_value(host, EsConfig, "127.0.0.1"),
     EsPort = proplists:get_value(port, EsConfig, 9200),
-    {ok, LSock} = gen_tcp:listen(1234, [binary, {active, false}, {packet, 4},
+    Port = application:get_env(auditrecv, port, 1234),
+    {ok, LSock} = gen_tcp:listen(Port, [binary, {active, false}, {packet, 4},
         {reuseaddr, true}]),
-    lager:debug("listening for audit clients on port 1234"),
+    lager:debug("listening for audit clients on port ~p", [Port]),
     [spawn(fun start_fsm/0) || _N <- lists:seq(1,3)],
     Flags = #{
         strategy => simple_one_for_one,

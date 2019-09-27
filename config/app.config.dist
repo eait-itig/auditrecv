@@ -1,5 +1,6 @@
 [
   {auditrecv, [
+    {port, 1234},
     {elasticsearch, [
       {host, "127.0.0.1"},
       {port, 9200}
