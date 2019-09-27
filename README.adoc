@@ -1,0 +1,93 @@
+:toc: left
+:source-highlighter: pygments
+:doctype: book
+:idprefix:
+:docinfo:
+
+# auditrecv
+
+Minimal receiver for `audit_remote.so` streams (from illumos/Solaris auditd)
+which turns the audit records into JSON and inserts them into ElasticSearch. 
+
+Also designed to integrate with Joyent Triton for looking up the names of
+zones and their owners to annotate the events.
+
+The event objects inserted into ElasticSearch look like:
+
+[source,json]
+----
+{
+    "time": "2019-09-27T01:39:19.560Z",
+    "version": 2,
+    "zonealias": "uqracing-website",
+    "zonename": "d8069ac3-0a93-e9fb-d82e-d61541df45f9",
+    "from": "ip.of.global.zone",
+    "event": "execve",
+    "path": "/usr/bin/foobar",
+    "exec_args": [ "foobar", "-D", "-R" ],
+    "errno": "eperm",
+    "return": -1,
+    "subject": {
+      "pid": 608577,
+      "audit_id": 1001,
+      "uid": 0, "gid": 0,
+      "ruid": 0, "rgid": 0,
+      "session_id": 1663472728,
+      "terminal": {
+        "ip": "10.1.2.3",
+        "local_port": 22,
+        "remote_port": 61707
+      },
+    },
+    "attributes": {
+      "devid": "-1",
+      "fsid": 65556,
+      "uid": 0,
+      "gid": 0,
+      "inode_hex": "000000000000B344",
+      "mode_octal": "100755"
+    }
+}
+----
+
+## GSS mechanisms
+
+The `audit_remote.so` traffic is always wrapped in GSS tokens, which means
+it has to use a particular GSS mechanism plugin.
+
+Currently there's only support for the "dummy" GSS mech. This isn't installed
+by default with SmartOS or other illumos distros, so you'll need to grab it
+out of a compiled illumos directory (you can find it in
+`usr/src/lib/gss_mechs/mech_dummy/{i386,amd64}/mech_dummy.so.1`). Copy this
+into `/usr/lib/gss` and `/usr/lib/64/gss` and then add a line for it into
+`/etc/gss/mech`.
+
+Recommended way to do this for Triton CNs is to set up a service in 
+`/opt/custom/smf` which overlay mounts these two directories and injects the
+`mech_dummy.so.1` files.
+
+## Setup
+
+auditrecv is meant to run in a zone on the admin VLAN, with a leg onto another
+network where it can reach the ElasticSearch server.
+
+The Triton CNs should be set up to use the `audit_remote` plugin as follows:
+
+----
+auditconfig -setpolicy zonename,argv,cnt
+auditconfig -setplugin audit_remote active p_hosts=$IP_OF_AUDITRECV:1234:dummy
+----
+
+You'll need to run that after reboot, and you probably want some extra commands
+to set the default flags for collection, too.
+
+Recommended way once again is an SMF service in `/opt/custom/smf` which runs
+these steps and then restarts the `auditd` service.
+
+To set up auditrecv itself, copy `config/app.config.dist` and
+`config/vm.args.dist` to their names without `.dist` (i.e. `config/app.config`, `config/vm.args`) and edit them. You'll need to set the hostnames/IPs of
+elasticsearch, VMAPI and Mahi. Then run `rebar3 release` to create a release
+and move that into `/opt/auditrecv`.
+
+You can then set up the `auditrecv` user, create the `/var/log/auditrecv` and
+`/var/db/auditrecv` directories, and import the `smf.xml` file with `svccfg`.
