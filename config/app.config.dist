@@ -1,0 +1,19 @@
+[
+  {auditrecv, [
+    {elasticsearch, [
+      {host, "127.0.0.1"},
+      {port, 9200}
+    ]},
+    {vmapi, "vmapi.coal.joyent.us"},
+    {mahi, "mahi.coal.joyent.us"}
+  ]},
+  {lager, [
+    {log_root, "/var/log/auditrecv"},
+    {handlers, [
+      {lager_console_backend, [{level, info}]},
+      {lager_file_backend, [{file, "error.log"}, {level, error}]},
+      {lager_file_backend, [{file, "debug.log"}, {level, debug}]},
+      {lager_file_backend, [{file, "console.log"}, {level, info}]}
+    ]}
+  ]}
+].
