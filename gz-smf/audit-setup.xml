@@ -1,0 +1,35 @@
+<?xml version="1.0" ?>
+<!DOCTYPE service_bundle SYSTEM '/usr/share/lib/xml/dtd/service_bundle.dtd.1'>
+<service_bundle type="manifest" name="eait/audit-setup">
+    <service version="1" type="service" name="eait/audit-setup">
+	<create_default_instance enabled='true' />
+	<single_instance/>
+	<dependency restart_on="none" type="service"
+	    name="multi_user_dependency" grouping="require_all">
+	    <service_fmri value="svc:/milestone/multi-user"/>
+	</dependency>
+	<dependency restart_on="none" type="service"
+	    name="mount_gss_dependency" grouping="require_all">
+	    <service_fmri value="svc:/eait/mount-gss"/>
+	</dependency>
+	<exec_method timeout_seconds="60" type="method" name="start"
+	    exec="/opt/custom/lib/svc/method/audit-setup start"/>
+	<exec_method timeout_seconds="60" type="method" name="stop"
+	    exec="/opt/custom/lib/svc/method/audit-setup stop"/>
+	<property_group type="framework" name="startd">
+		<propval type="astring" name="duration" value="transient"/>
+	</property_group>
+	<template>
+	    <common_name>
+		<loctext xml:lang="C">
+			Set up auditing configuration
+		</loctext>
+	    </common_name>
+	    <description>
+		<loctext xml:lang="C">
+			Sets up local auditing configuration for EAIT compute nodes
+		</loctext>
+	    </description>
+	</template>
+    </service>
+</service_bundle>

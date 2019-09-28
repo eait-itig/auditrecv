@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<!DOCTYPE service_bundle SYSTEM '/usr/share/lib/xml/dtd/service_bundle.dtd.1'>
+<service_bundle type="manifest" name="eait/mount-gss">
+    <service version="1" type="service" name="eait/mount-gss">
+	<create_default_instance enabled='true' />
+	<single_instance/>
+	<dependency restart_on="none" type="service"
+	    name="multi_user_dependency" grouping="require_all">
+	    <service_fmri value="svc:/milestone/multi-user"/>
+	</dependency>
+	<exec_method timeout_seconds="60" type="method" name="start"
+	    exec="/opt/custom/lib/svc/method/mount-gss start"/>
+	<exec_method timeout_seconds="60" type="method" name="stop"
+	    exec="/opt/custom/lib/svc/method/mount-gss stop"/>
+	<property_group type="framework" name="startd">
+		<propval type="astring" name="duration" value="transient"/>
+	</property_group>
+	<template>
+	    <common_name>
+		<loctext xml:lang="C">
+			Mount GSS overlay
+		</loctext>
+	    </common_name>
+	    <description>
+		<loctext xml:lang="C">
+			Overlays the GSS mech directories and adds the dummy mech
+		</loctext>
+	    </description>
+	</template>
+    </service>
+</service_bundle>

@@ -66,6 +66,12 @@ Recommended way to do this for Triton CNs is to set up a service in
 `/opt/custom/smf` which overlay mounts these two directories and injects the
 `mech_dummy.so.1` files.
 
+In the `gz-smf` directory of this repository there are working examples of
+SMF manifests and method scripts to achieve this. These examples are meant to
+be placed in `/opt/custom/lib/svc/method` and the manifests in
+`/opt/custom/smf`. The `mech_dummy.so.1` files should be placed in
+`/opt/custom/lib/gss` and `/opt/custom/lib/amd64/gss`.
+
 ## Setup
 
 auditrecv is meant to run in a zone on the admin VLAN, with a leg onto another
@@ -82,10 +88,12 @@ You'll need to run that after reboot, and you probably want some extra commands
 to set the default flags for collection, too.
 
 Recommended way once again is an SMF service in `/opt/custom/smf` which runs
-these steps and then restarts the `auditd` service.
+these steps and then restarts the `auditd` service (and again, there's an
+example of this in the `gz-smf` directory).
 
 To set up auditrecv itself, copy `config/app.config.dist` and
-`config/vm.args.dist` to their names without `.dist` (i.e. `config/app.config`, `config/vm.args`) and edit them. You'll need to set the hostnames/IPs of
+`config/vm.args.dist` to their names without `.dist` (i.e. `config/app.config`,
+`config/vm.args`) and edit them. You'll need to set the hostnames/IPs of
 elasticsearch, VMAPI and Mahi. Then run `rebar3 release` to create a release
 and move that into `/opt/auditrecv`.
 
