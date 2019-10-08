@@ -31,6 +31,8 @@
 
 -vsn(2).
 
+-include_lib("public_key/include/public_key.hrl").
+
 -export([start_link/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
@@ -115,12 +117,15 @@ dummy_encode(Type, Data) ->
 -define(DH_DESTROY_CNTX, 5).
 
 xdr_get_padblob(<<Len:32/big, Data:Len/binary, Rem0/binary>>) ->
-    Padding = 4 - (Len rem 4),
-    <<_:Padding/binary, Rem1/binary>> = Rem0,
+    Padding = if
+        ((Len rem 4) > 0) -> 4 - (Len rem 4);
+        true -> 0
+    end,
+    <<0:Padding/unit:8, Rem1/binary>> = Rem0,
     {Data, Rem1}.
 
 dh_decode(Data) ->
-    <<Version:32/big, Rem0/binary>> = Data,
+    <<0:16, Version:32/big, Rem0/binary>> = Data,
     1 = Version,
     <<TokenType:32/big-signed, Rem1/binary>> = Rem0,
     {Ret, Rem2} = dh_decode(TokenType, Rem1),
@@ -129,17 +134,17 @@ dh_decode(Data) ->
 
 dh_decode(?DH_INIT_CNTX, Rem0) ->
     {Ctx, Rem1} = dh_decode_ctx_desc(Rem0),
-    <<Count:32/big, Rem2>> = Rem1,
+    <<Count:32/big, Rem2/binary>> = Rem1,
     {Keys, Rem3} = lists:foldl(fun (_N, {KeysAcc, BinAcc}) ->
         <<Key:8/binary, Rest/binary>> = BinAcc,
         {KeysAcc ++ [Key], Rest}
     end, {[], Rem2}, lists:seq(1, Count)),
-    {Ctx#{keys => Keys}, Rem3}.
+    {Ctx#{type => init_context, keys => Keys}, Rem3}.
 
 dh_decode_ctx_desc(Rem0) ->
     {Remote, Rem1} = xdr_get_padblob(Rem0),
     {Local, Rem2} = xdr_get_padblob(Rem1),
-    <<Flags:32/big, Expire:32/big, Rem3/binary>> = Rem2,
+    <<Flags:32/big, Expire:32/big-signed, 1:32/big, Rem3/binary>> = Rem2,
     <<InitiatorType:32/big, Rem4/binary>> = Rem3,
     {InitiatorAddr, Rem5} = xdr_get_padblob(Rem4),
     <<AcceptorType:32/big, Rem6/binary>> = Rem5,
@@ -150,6 +155,12 @@ dh_decode_ctx_desc(Rem0) ->
         appdata => AppData, initiator => {InitiatorType, InitiatorAddr},
         acceptor => {AcceptorType, AcceptorAddr}
     }, Rem8}.
+
+des_fix_parity(B) ->
+    << <<N:7,(odd_parity(N)):1>> || <<N:7,_:1>> <= B >>.
+odd_parity(N) ->
+    Set = length([ 1 || <<1:1>> <= <<N>> ]),
+    if (Set rem 2 == 1) -> 0; true -> 1 end.
 
 gss_neg(enter, _, #state{sock = S}) ->
     inet:setopts(S, [{active, once}]),
@@ -172,6 +183,28 @@ gss_neg(info, {tcp, Sock, Data}, S = #state{sock = Sock}) ->
         {?DH1024_OID, Inner} ->
             DhPkt = dh_decode(Inner),
             lager:debug("gss-dh message: ~p", [DhPkt]),
+            case DhPkt of
+                #{type := init_context,
+                  local := MyNetName, remote := TheirNetName,
+                  keys := EncKeys, verifier := Verifier} ->
+                    MyPrivKey = 16#4714de0d57169ed1594b500f84538e1fe747f0ed27ea23498bbcc4138f1a55be3b39ac3286d4b1ed422c6e3fd5728694dbfe8d9dfd1f883cb66adf2164c8f28381c6946c98f2664bb33008dd844b9310fe8e76f7247723354c6396f159c3226e15cad4cd227974cd5d50469e9dccaad1fb1d2d0bc70ccd758526391b042a7506,
+                    TheirPubKey = 16#a6aa294961f1ecada9d7d9c18e838ae60b3579b5ae5980c2bbf2a5753a61712592c8b4198809aa0d769479c40f1fe93a1edc3b1e06050583e7e34b7ce27e7bfce04284ffbef4d39531899ca46bd4d94f72a3675ea0af4ba898628b18e1d946191d9aceacefa3d554fcc6d8fefca4df18b1afd44ce92d51185b93c8317581099b,
+                    Params = #'DHParameter'{base = 2, prime = 16#E65DA65D2AD45FB965E350E19A2009B1B90161708B5AE4CCC399D320968D86E63B92186C46EF0A1D6A4FABD91EE13102163C7139E1F148AB6AF2DC8BE400087D65E16E007BEC44E4F46621730165C7518DDC6255AE10F52FC42270F7CF1412E062687B40387455E51D995A8360DB3DC85002F72379D3537E97D2B1F4A71FC90F},
+                    Common = public_key:compute_key(TheirPubKey, MyPrivKey, Params),
+                    CommonLen = byte_size(Common),
+                    PadLen = (CommonLen - 24) div 2,
+                    <<_:PadLen/unit:8, DesPart:24/binary, _:PadLen/unit:8>> = Common,
+                    {DesKeys, <<>>} = lists:foldl(fun (_, {Ks, Rem}) ->
+                        <<DesPartN:8/binary, Rem1/binary>> = Rem,
+                        DesKey = des_fix_parity(DesPartN),
+                        {[DesKey | Ks], Rem1}
+                    end, {[], DesPart}, lists:seq(1,3)),
+                    lager:debug("3des key: ~p", [DesKeys]),
+                    Keys = [crypto:block_decrypt(des3_cbc, DesKeys, <<0:64>>, K) || K <- EncKeys],
+                    lager:debug("des keys: ~p", [Keys]);
+
+                _ -> ok
+            end,
             {repeat_state, S#state{mech = dh1024}};
         {Oid, _} ->
             lager:debug("unknown gss oid: ~p", [Oid]),
