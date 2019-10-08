@@ -46,10 +46,29 @@ ip4_stringify(<<A1, A2, A3, A4>>) ->
     AB4 = integer_to_binary(A4),
     <<AB1/binary, ".", AB2/binary, ".", AB3/binary, ".", AB4/binary>>.
 
+ip6_stringify(Addr) ->
+    iolist_to_binary(
+        lists:join(":", [integer_to_list(A, 16) || <<A:16/big>> <= Addr])).
+
 hex_stringify(V) ->
     << <<Y>> || <<X:4>> <= V, Y <- integer_to_list(X, 16) >>.
 octal_stringify(V) ->
     integer_to_binary(V, 8).
+
+parse_net_port_id(Base, TermPortId) ->
+    case TermPortId of
+        <<RemotePort:16/little, LocalPort:16/little>> ->
+            Base#{ local_port => LocalPort, remote_port => RemotePort };
+        <<_:30, RemotePortHigh:2/bitstring,
+          _:2, RemotePortLow:14/bitstring, LocalPort:16/little>> ->
+            <<RemotePort:16/little>> = <<RemotePortHigh/bitstring,
+                RemotePortLow/bitstring>>,
+            Base#{ local_port => LocalPort, remote_port => RemotePort };
+        _ ->
+            PortIdHex = << <<Y>> || <<X:4>> <= TermPortId,
+                Y <- integer_to_list(X,16) >>,
+            Base#{ port_id => PortIdHex }
+    end.
 
 parse_terminal(TermMachAddr, TermPortId) ->
     case TermMachAddr of
@@ -59,19 +78,7 @@ parse_terminal(TermMachAddr, TermPortId) ->
             #{ dev => DevId };
         _ ->
             Base = #{ ip => ip4_stringify(TermMachAddr) },
-            case TermPortId of
-                <<RemotePort:16/little, LocalPort:16/little>> ->
-                    Base#{ local_port => LocalPort, remote_port => RemotePort };
-                <<_:30, RemotePortHigh:2/bitstring,
-                  _:2, RemotePortLow:14/bitstring, LocalPort:16/little>> ->
-                    <<RemotePort:16/little>> = <<RemotePortHigh/bitstring,
-                        RemotePortLow/bitstring>>,
-                    Base#{ local_port => LocalPort, remote_port => RemotePort };
-                _ ->
-                    PortIdHex = << <<Y>> || <<X:4>> <= TermPortId,
-                        Y <- integer_to_list(X,16) >>,
-                    Base#{ port_id => PortIdHex }
-            end
+            parse_net_port_id(Base, TermPortId)
     end.
 
 parse_token(Binary) ->
@@ -252,6 +259,14 @@ parse_token(Z0, <<?AUT_TEXT, Len:16/big, StrNull:Len/binary, Rem/binary>>) ->
     Z1 = Z0#{text => Str},
     parse_token(Z1, Rem);
 
+parse_token(Z0, <<?AUT_IN_ADDR, Addr:4/binary, Rem/binary>>) ->
+    Z1 = Z0#{addr => ip4_stringify(Addr)},
+    parse_token(Z1, Rem);
+
+parse_token(Z0, <<?AUT_IN_ADDR_EX, ?AU_IPV6:32/big, Addr:16/binary, Rem/binary>>) ->
+    Z1 = Z0#{addr => ip6_stringify(Addr)},
+    parse_token(Z1, Rem);
+
 parse_token(Z0, <<?AUT_PRIV, SetLen:16/big, SetNull:SetLen/binary,
         PrivsLen:16/big, PrivsNull:PrivsLen/binary, Rem/binary>>) ->
     [Set, _] = binary:split(SetNull, [<<0>>]),
@@ -281,6 +296,34 @@ postproc(Rec0 = #{event := kill, args := Args0 = #{<<"signal">> := SigId}}) when
     postproc(Rec1);
 postproc(Rec0 = #{event := setppriv, args := Args0 = #{<<"op">> := OpId}}) when is_integer(OpId) ->
     Args1 = Args0#{<<"op">> => audefs:priv_op_to_name(OpId)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{args := Args0 = #{<<"as_success">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"as_success">> => audefs:pmask_to_names(Mask)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{args := Args0 = #{<<"as_failure">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"as_failure">> => audefs:pmask_to_names(Mask)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{event := setaudit_addr, args := Args0 = #{<<"port">> := PortId}}) when is_integer(PortId) ->
+    Args1 = Args0#{<<"port">> => parse_net_port_id(#{}, <<PortId:64/big>>)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{event := auditon_setpmask, args := Args0 = #{<<"setpmask:as_success">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"setpmask:as_success">> => audefs:pmask_to_names(Mask)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{event := auditon_setpmask, args := Args0 = #{<<"setpmask:as_failure">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"setpmask:as_failure">> => audefs:pmask_to_names(Mask)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{event := auditon_setkmask, args := Args0 = #{<<"setkmask:as_success">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"setkmask:as_success">> => audefs:pmask_to_names(Mask)},
+    Rec1 = Rec0#{args => Args1},
+    postproc(Rec1);
+postproc(Rec0 = #{event := auditon_setkmask, args := Args0 = #{<<"setkmask:as_failure">> := Mask}}) when is_integer(Mask) ->
+    Args1 = Args0#{<<"setkmask:as_failure">> => audefs:pmask_to_names(Mask)},
     Rec1 = Rec0#{args => Args1},
     postproc(Rec1);
 postproc(Rec0 = #{errno := ErrNo}) when is_integer(ErrNo) ->

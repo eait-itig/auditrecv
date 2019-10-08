@@ -28,7 +28,8 @@
 
 -module(audefs).
 
--export([event_to_name/1, sig_to_name/1, priv_op_to_name/1, errno_to_name/1]).
+-export([event_to_name/1, sig_to_name/1, priv_op_to_name/1, errno_to_name/1,
+    pmask_to_names/1]).
 
 event_to_name(0) -> null;
 event_to_name(1) -> exit;
@@ -656,3 +657,44 @@ errno_to_name(149) -> ealready;
 errno_to_name(150) -> einprogress;
 errno_to_name(151) -> estale;
 errno_to_name(N) -> integer_to_binary(N).
+
+pmask_to_names(V) ->
+    Classes = [
+        {16#ffffffff, <<"all">>},
+        {16#80000000, <<"ot">>},
+        {16#40000000, <<"ex">>},
+        {16#20000000, <<"io">>},
+        {16#01c00000, <<"xx">>},
+        {16#01000000, <<"xs">>},
+        {16#00800000, <<"xc">>},
+        {16#00400000, <<"xp">>},
+        {16#00300000, <<"pc">>},
+        {16#00200000, <<"pm">>},
+        {16#00100000, <<"ps">>},
+        {16#000f0000, <<"ad">>},
+        {16#00080000, <<"aa">>},
+        {16#00070000, <<"am">>},
+        {16#00040000, <<"ua">>},
+        {16#00020000, <<"as">>},
+        {16#00010000, <<"ss">>},
+        {16#00008000, <<"cy">>},
+        {16#00004000, <<"ap">>},
+        {16#00001000, <<"lo">>},
+        {16#00000400, <<"na">>},
+        {16#00000200, <<"ip">>},
+        {16#00000100, <<"nt">>},
+        {16#00000040, <<"cl">>},
+        {16#00000020, <<"fd">>},
+        {16#00000010, <<"fc">>},
+        {16#00000008, <<"fm">>},
+        {16#00000004, <<"fa">>},
+        {16#00000002, <<"fw">>},
+        {16#00000001, <<"fr">>}
+    ],
+    {_Rem, OutFlags} = lists:foldl(fun ({Mask, Name}, {Rem, Flags}) ->
+        case (Rem band Mask) of
+            Mask -> {Rem band (bnot Mask), [Name | Flags]};
+            _ -> {Rem, Flags}
+        end
+    end, {V, []}, Classes),
+    OutFlags.

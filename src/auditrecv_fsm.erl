@@ -39,7 +39,8 @@
 start_link(LSock, EsHost, EsPort) ->
     gen_statem:start_link(?MODULE, [LSock, EsHost, EsPort], []).
 
--define(BUF_WINDOW, 5).
+-define(BUF_WINDOW, 64).
+-define(BUF_TIMEOUT, 300).
 -record(state, {sock, lsock, peer, gun, eshost, esport, buf = [], lastseq=0, mech}).
 
 callback_mode() -> [state_functions, state_enter].
@@ -59,6 +60,8 @@ accept(enter, _, S = #state{lsock = LSock, eshost = EsHost, esport = EsPort}) ->
 accept(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     {stop, normal, S};
 accept(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
+accept(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 accept(info, accepted, S) ->
     {next_state, version_neg, S}.
@@ -84,6 +87,8 @@ version_neg(info, {tcp, Sock, Data}, S = #state{sock = Sock}) ->
             {stop, {unknown_versions, Versions}, S}
     end;
 version_neg(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
+version_neg(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 version_neg(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     {stop, normal, S}.
@@ -174,32 +179,55 @@ gss_neg(info, {tcp, Sock, Data}, S = #state{sock = Sock}) ->
     end;
 gss_neg(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
     keep_state_and_data;
+gss_neg(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
 gss_neg(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     {stop, normal, S}.
 
-bulk_and_ack(S0 = #state{gun = Gun, buf = B0}) ->
+bulk_and_ack(S0) -> bulk_and_ack(S0, 20000, 2).
+
+bulk_and_ack(S0 = #state{peer = Peer}, _Timeout, 0) ->
+    lager:error("gave up sending events from ~p to ES", [Peer]),
+    timer:sleep(10000),
+    S0;
+bulk_and_ack(S0 = #state{gun = Gun, buf = B0}, Timeout, Retries) ->
     Body = make_bulk_body(B0),
     Hdrs = [{<<"content-type">>, <<"application/x-ndjson">>}],
     Stream = gun:post(Gun, "/_bulk", Hdrs, Body),
-    case gun:await(Gun, Stream) of
+    case gun:await(Gun, Stream, Timeout) of
         {response, fin, Status, _} ->
-            lager:error("bulk returned http ~p", [Status]);
+            lager:error("bulk returned http ~p", [Status]),
+            timer:sleep(1000),
+            bulk_and_ack(S0, Timeout, Retries - 1);
         {response, nofin, _Status, _} ->
-            {ok, RetBody} = gun:await_body(Gun, Stream),
+            {ok, RetBody} = gun:await_body(Gun, Stream, Timeout),
             Ret = jsx:decode(RetBody, [return_maps]),
             case Ret of
-                #{<<"errors">> := false} -> ok;
-                _ ->
-                    lager:error("bulk returned errors: ~p", [Ret])
-            end
-    end,
-    S1 = lists:foldl(fun send_ack/2, S0, B0),
-    lager:trace("ack'd records ~p", [[SN || {SN,_} <- B0]]),
-    S1#state{buf = []}.
+                #{<<"errors">> := false} ->
+                    S1 = lists:foldl(fun send_ack/2, S0, B0),
+                    lager:trace("ack'd records ~p", [[SN || {SN,_} <- B0]]),
+                    S1#state{buf = []};
+                _ when (Retries > 0) ->
+                    lager:error("bulk returned errors: ~p", [Ret]),
+                    timer:sleep(1000),
+                    bulk_and_ack(S0, Timeout, Retries - 1)
+            end;
+        {error, timeout} ->
+            lager:error("bulk timed out, retrying"),
+            bulk_and_ack(S0, Timeout * 2, Retries - 1)
+    end.
+
+is_uuid(Bin) ->
+    case binary:split(Bin, [<<"-">>], [global]) of
+        [P1, P2, P3, P4, P5] when (size(P1) == 8) and (size(P2) == 4) and
+                (size(P3) == 4) and (size(P4) == 4) and (size(P5) == 12) ->
+            true;
+        _ -> false
+    end.
 
 recv_audit(enter, _, #state{sock = S}) ->
     inet:setopts(S, [{active, once}]),
-    {keep_state_and_data, [{state_timeout, 1000, idle}]};
+    {keep_state_and_data, [{state_timeout, ?BUF_TIMEOUT, idle}]};
 recv_audit(info, {tcp, Sock, Data}, S0 = #state{sock = Sock, buf = B0}) ->
     Pkt = der:read_tag(Data),
     case gss_decode(Pkt) of
@@ -213,6 +241,7 @@ recv_audit(info, {tcp, Sock, Data}, S0 = #state{sock = Sock, buf = B0}) ->
             Rec0 = autoken:parse_token(AuditRec),
             Rec1 = Rec0#{from => list_to_binary(inet:ntoa(S0#state.peer))},
             Rec2 = case Rec1 of
+                #{zonename := <<"global">>} -> Rec1;
                 #{zonename := Z} ->
                     case vmlookup:lookup(Z) of
                         {ok, Z2} -> Rec1#{zonealias => Z2};
@@ -220,7 +249,20 @@ recv_audit(info, {tcp, Sock, Data}, S0 = #state{sock = Sock, buf = B0}) ->
                     end;
                 _ -> Rec1
             end,
-            B1 = [{SeqNr, Rec2} | B0],
+            Rec3 = case Rec2 of
+                #{zonename := <<"global">>, event := execve,
+                  path := <<"/usr/sbin/zlogin">>, exec_args := Args} ->
+                    UuidArg = case lists:search(fun is_uuid/1, Args) of
+                        {value, U} ->
+                            case vmlookup:lookup(U) of
+                                {ok, U2} -> Rec2#{zonealias => U2};
+                                _ -> Rec2
+                            end;
+                        _ -> Rec2
+                    end;
+                _ -> Rec2
+            end,
+            B1 = [{SeqNr, Rec3} | B0],
             if
                 (length(B1) > ?BUF_WINDOW) ->
                     S2 = bulk_and_ack(S1#state{buf = B1}),
@@ -239,6 +281,14 @@ recv_audit(state_timeout, idle, S = #state{buf = B0}) when (length(B0) > 0) ->
 recv_audit(state_timeout, _, #state{}) ->
     keep_state_and_data;
 recv_audit(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
+recv_audit(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
+recv_audit(info, {gun_response, Gun, _, _, Status, _}, #state{gun = Gun}) ->
+    lager:error("ignoring a gun response (http ~p)", [Status]),
+    keep_state_and_data;
+recv_audit(info, {gun_data, Gun, _, _, _}, #state{gun = Gun}) ->
+    lager:debug("ignoring some gun data"),
     keep_state_and_data;
 recv_audit(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     lager:info("stream from ~p closed", [S#state.peer]),

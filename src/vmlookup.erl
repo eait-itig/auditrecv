@@ -36,7 +36,7 @@ start_link(VmApi, Mahi) ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [VmApi, Mahi], []).
 
 lookup(Uuid) ->
-    gen_server:call(?MODULE, {lookup, Uuid}).
+    gen_server:call(?MODULE, {lookup, Uuid}, infinity).
 
 -record(state, {vmgun, mhgun, vms = #{}, users = #{}}).
 
@@ -55,7 +55,7 @@ handle_call({lookup, Uuid}, _From, S = #state{vms = Vms0}) ->
 
 handle_lookup(Uuid, S = #state{vmgun = VmGun, mhgun = MhGun}) ->
     Stream = gun:get(VmGun, <<"/vms/", Uuid/binary>>),
-    case gun:await(VmGun, Stream) of
+    case gun:await(VmGun, Stream, 2000) of
         {response, fin, Status, _} ->
             {reply, {error, Status}, S};
         {response, nofin, Status, _} when (Status < 300) ->
@@ -89,7 +89,9 @@ handle_lookup(Uuid, S = #state{vmgun = VmGun, mhgun = MhGun}) ->
         {response, nofin, _, _} ->
             {ok, Body} = gun:await_body(VmGun, Stream),
             Err = jsx:decode(Body, [return_maps]),
-            {reply, {error, Err}, S}
+            {reply, {error, Err}, S};
+        {error, timeout} ->
+            {reply, {error, timeout}, S}
     end.
 
 handle_cast(Msg, S) ->
