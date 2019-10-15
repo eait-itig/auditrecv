@@ -43,12 +43,14 @@ start_link(LSock, EsHost, EsPort) ->
 
 -define(BUF_WINDOW, 64).
 -define(BUF_TIMEOUT, 300).
--record(state, {sock, lsock, peer, gun, eshost, esport, buf = [], lastseq=0, mech}).
+-define(BUF_INTERVAL, 2000).
+-record(state, {sock, lsock, peer, gun, eshost, esport, buf = [], lastseq=0, lastseqb=0, mech, tref, btref}).
 
 callback_mode() -> [state_functions, state_enter].
 
 init([LSock, EsHost, EsPort]) ->
-    {ok, accept, #state{eshost = EsHost, esport = EsPort, lsock = LSock}}.
+    TRef = timer:send_interval(60000, status_timeout),
+    {ok, accept, #state{eshost = EsHost, esport = EsPort, lsock = LSock, tref = TRef}}.
 
 accept(enter, _, S = #state{lsock = LSock, eshost = EsHost, esport = EsPort}) ->
     {ok, Sock} = gen_tcp:accept(LSock),
@@ -65,14 +67,20 @@ accept(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 accept(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
     keep_state_and_data;
+accept(info, status_timeout, #state{}) ->
+    keep_state_and_data;
 accept(info, accepted, S) ->
     {next_state, version_neg, S}.
 
-terminate(_R, _St, #state{sock = undefined}) ->
+terminate(_R, _St, #state{sock = undefined, tref = TRef, btref = BTRef}) ->
+    timer:cancel(TRef),
+    timer:cancel(BTRef),
     ok;
-terminate(_R, _St, #state{sock = Sock, gun = Gun}) ->
+terminate(_R, _St, #state{sock = Sock, gun = Gun, tref = TRef, btref = BTRef}) ->
     gen_tcp:close(Sock),
     gun:close(Gun),
+    timer:cancel(TRef),
+    timer:cancel(BTRef),
     ok.
 
 version_neg(enter, _, #state{sock = S}) ->
@@ -91,6 +99,8 @@ version_neg(info, {tcp, Sock, Data}, S = #state{sock = Sock}) ->
 version_neg(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 version_neg(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
+    keep_state_and_data;
+version_neg(info, status_timeout, #state{}) ->
     keep_state_and_data;
 version_neg(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     {stop, normal, S}.
@@ -210,6 +220,8 @@ gss_neg(info, {tcp, Sock, Data}, S = #state{sock = Sock}) ->
             lager:debug("unknown gss oid: ~p", [Oid]),
             {repeat_state, S}
     end;
+gss_neg(info, status_timeout, #state{}) ->
+    keep_state_and_data;
 gss_neg(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 gss_neg(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
@@ -217,12 +229,11 @@ gss_neg(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
 gss_neg(info, {tcp_closed, Sock}, S = #state{sock = Sock}) ->
     {stop, normal, S}.
 
-bulk_and_ack(S0) -> bulk_and_ack(S0, 20000, 2).
+bulk_and_ack(S0) -> bulk_and_ack(S0, 30000, 2).
 
 bulk_and_ack(S0 = #state{peer = Peer}, _Timeout, 0) ->
     lager:error("gave up sending events from ~p to ES", [Peer]),
-    timer:sleep(10000),
-    S0;
+    error(es_timeout);
 bulk_and_ack(S0 = #state{gun = Gun, buf = B0}, Timeout, Retries) ->
     Body = make_bulk_body(B0),
     Hdrs = [{<<"content-type">>, <<"application/x-ndjson">>}],
@@ -258,9 +269,15 @@ is_uuid(Bin) ->
         _ -> false
     end.
 
-recv_audit(enter, _, #state{sock = S}) ->
-    inet:setopts(S, [{active, once}]),
-    {keep_state_and_data, [{state_timeout, ?BUF_TIMEOUT, idle}]};
+recv_audit(enter, _, S0 = #state{sock = Sock}) ->
+    inet:setopts(Sock, [{active, once}]),
+    S1 = case S0#state.btref of
+        undefined ->
+            BTref = timer:send_interval(?BUF_INTERVAL, {timeout, noref, idle}),
+            S0#state{btref = BTref};
+        _ -> S0
+    end,
+    {keep_state, S1, [{state_timeout, ?BUF_TIMEOUT, idle}]};
 recv_audit(info, {tcp, Sock, Data}, S0 = #state{sock = Sock, buf = B0}) ->
     Pkt = der:read_tag(Data),
     case gss_decode(Pkt) of
@@ -313,6 +330,14 @@ recv_audit(state_timeout, idle, S = #state{buf = B0}) when (length(B0) > 0) ->
     {keep_state, S1};
 recv_audit(state_timeout, _, #state{}) ->
     keep_state_and_data;
+recv_audit(info, {timeout, _, idle}, S = #state{buf = B0}) when (length(B0) > 0) ->
+    S1 = bulk_and_ack(S),
+    {keep_state, S1};
+recv_audit(info, {timeout, _, _}, #state{}) ->
+    keep_state_and_data;
+recv_audit(info, status_timeout, S0 = #state{peer = Peer, lastseq = SeqNr1, lastseqb = SeqNr0, buf = B0}) ->
+    lager:debug("~p at seq no ~p [+~p] (queue len ~p)", [Peer, SeqNr1, SeqNr1 - SeqNr0, length(B0)]),
+    {keep_state, S0#state{lastseqb = SeqNr1}};
 recv_audit(info, {gun_up, Gun, _}, #state{gun = Gun}) ->
     keep_state_and_data;
 recv_audit(info, {gun_down, Gun, _, _, _, _}, #state{gun = Gun}) ->
