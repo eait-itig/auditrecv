@@ -34,16 +34,25 @@ AUDIT_PORT=1234
 
 case "$1" in
   start)
+    auditconfig -setclass AUE_SETAUDIT_ADDR as
+    auditconfig -setclass AUE_SETAUDIT as
     auditconfig -setpolicy argv,cnt,zonename
     auditconfig -setflags ex,pm,as,lo
     auditconfig -setnaflags lo,as
     auditconfig -setplugin audit_remote active p_hosts=$AUDIT_IP:$AUDIT_PORT:dummy
+    auditconfig -setplugin audit_remote active p_timeout=90
+    auditconfig -setplugin audit_remote active p_retries=2
+    auditconfig -setplugin audit_remote active qsize=32768 32768
+    auditconfig -setqbufsz 1048576
+    auditconfig -setqhiwater 16384
     svcadm restart auditd
     ;;
   stop)
     auditconfig -setplugin audit_remote inactive
     auditconfig -setnaflags lo
     auditconfig -setflags ex,lo
+    auditconfig -setqbufsz 8192
+    auditconfig -setqhiwater 100
     svcadm restart auditd
     ;;
   *)
